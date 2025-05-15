@@ -16,6 +16,7 @@ import concurrent
 import logging
 import logging.config
 import logging.handlers
+import math
 import multiprocessing.managers
 import os.path
 import subprocess
@@ -1354,12 +1355,41 @@ class TBGatewayService:
             data["telemetry"] = {"ts": int(time() * 1000), "values": telemetry}
         return data
 
+    def __contains_nan_or_inf(self, obj):# amo 2025/05/14 for replace nan
+        if isinstance(obj, dict):
+            return any(self.__contains_nan_or_inf(v) for v in obj.values())
+        elif isinstance(obj, list):
+            return any(self.__contains_nan_or_inf(v) for v in obj)
+        elif isinstance(obj, float):
+            return math.isnan(obj) or math.isinf(obj)
+        return False
+
+    def __replace_nan_with_null(self, obj):# amo 2025/05/14 for replace nan
+        if isinstance(obj, dict):
+            return {k: self.__replace_nan_with_null(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return  [self.__replace_nan_with_null(v) for v in obj]
+        elif isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None #keep the column and set value to None 
+        return obj
+
     @CollectStorageEventsStatistics('storageMsgPushed')
     def __send_data_pack_to_storage(self, data, connector_name, connector_id=None):
         if isinstance(data, ConvertedData):
             if self.__latency_debug_mode:
                 data.add_to_metadata({"putToStorageTs": int(time() * 1000)})
-            json_data = dumps(data.to_dict(self.__latency_debug_mode), separators=(',', ':'), skipkeys=True)
+            try:# amo 2025/05/14 for replace nan
+                json_data = dumps(data.to_dict(self.__latency_debug_mode), separators=(',', ':'), skipkeys=True)
+            except ValueError as e: # amo 2025/05/14 for replace nan
+                _data_dict = data.to_dict(self.__latency_debug_mode)
+                if self.__contains_nan_or_inf(_data_dict):
+                    log.debug("HEDAU: Data contains NaN or Infinity, cleaning it.")
+                    _clean_data = self.__replace_nan_with_null(_data_dict)
+                    log.debug("HEDAU: Clean finished.")
+                    json_data = dumps(_clean_data, separators=(',', ':'), skipkeys=True)
+                else:
+                    raise e
         else:
             json_data = dumps(data, separators=(',', ':'), skipkeys=True)
         save_result = self._event_storage.put(json_data)
